@@ -1,7 +1,8 @@
 # iOS Offline AI 模組設置步驟
 
 這個資料夾內的 Swift 檔案提供 iOS 上的離線語音辨識（Whisper-small）與離線翻譯（Qwen-2.5-1.5B-Instruct Q4_K_M）。
-以下步驟必須在 **Mac + Xcode** 上做，Windows 的 Flutter 端不會自動幫你加。
+
+兩個模型都以 **直接打包進 Runner app bundle** 的方式提供，App 啟動時從 bundle 讀取，毋須下載或網路。以下步驟必須在 **Mac + Xcode** 上做，Windows 的 Flutter 端不會自動幫你加。
 
 > 前提：已在 Mac clone 專案並執行過 `flutter pub get`，確認 `ios/Runner.xcworkspace` 可以正常開啟。
 
@@ -47,28 +48,34 @@ Runner/
 
 > 若用 group 加入，`Bundle.main.url(forResource: ..., subdirectory: "Models")` 會找不到。
 
-## 3) Qwen-2.5-1.5B GGUF 模型下載設定
+## 3) 放置 Qwen-2.5-1.5B-Instruct Q4_K_M GGUF（直接內建）
 
-`ModelDownloader.swift` 裡的 `Config`：
-
-```swift
-struct Config {
-    static let downloadURL: String = ""  // ← 填這個
-    static let sha256Hex: String  = ""   // ← 強烈建議填
-    static let expectedBytes: Int64 = 0
-}
-```
-
-推薦來源：
+從 HuggingFace 下載：
 
 ```
 https://huggingface.co/unsloth/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
 ```
 
-建議做法：
-1. 在你控制的 CDN（Cloudflare R2 / AWS S3 / 自家 nginx）放一份，避免 HF 限流或網址變動。
-2. 下載後 `shasum -a 256 Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`，把 64 字元的 hex 填進 `sha256Hex`。
-3. `expectedBytes` 填實際 size（純粹用來在 Content-Length 缺失時估進度，可不填）。
+檔名建議維持大小寫 `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`（`LlamaService` 也相容 lower-case `qwen2.5-1.5b-instruct-q4_k_m.gguf`）。
+
+拖進 Xcode Runner target 的 `Models/` 資料夾（或 Runner 根目錄）：
+
+```
+Runner/
+  Models/
+    Qwen2.5-1.5B-Instruct-Q4_K_M.gguf   <-- ~1GB，以一般檔案（非 folder reference）方式加入
+```
+
+加入時務必勾選：
+- [x] **Copy items if needed**
+- [x] **Add to targets → Runner**
+- [x] Target Membership 為 `Runner`
+
+> GGUF 是單一檔案，加入方式是「Create groups」或單純 add file 即可，**不要** 用 folder reference。`LlamaService.bundledModelURL()` 會在 bundle 根目錄與 `Models/` 子目錄同時搜尋。
+
+> 加上 ~1GB 檔案會讓 `.ipa` / `.xcarchive` 顯著變大；首次 Archive 需要多花一點時間。上架 App Store 時注意 IPA 大小限制（目前 4GB）。若走企業內部分發或 TestFlight，1GB 屬於可接受範圍。
+
+> 若你已有先前版本透過 `ModelDownloader` 下載到 `Application Support/OfflineAI/qwen2.5-1.5b-instruct-q4_k_m.gguf` 的檔案，`prewarmIfReady()` 在 bundle 找不到模型時會自動 fallback 去讀這個路徑，可平滑升級。
 
 ## 4) Info.plist
 
@@ -82,17 +89,16 @@ cd ios && pod install
 cd .. && flutter run -d <iPhone id>
 ```
 
-- 第一次啟動：進「更多 → 離線 AI 模型」→ 點「下載 Qwen」。下載完成後會自動載入。
-- 把網路關掉 / 飛航模式：`線上/離線 辨識` 設定 = 「關」或「自動」即觸發 Whisper + Qwen 路徑。
+- 首次啟動會自動從 bundle 載入 Whisper 與 Qwen（略有數秒預熱），之後進入 `更多 → 離線 AI 模型` 可看到兩顆模型皆顯示「已就緒」。
+- 直接打開飛航模式即可測試離線翻譯與辨識。
 
 ## 常見問題
 
 | 症狀 | 可能原因 |
 | ---- | -------- |
 | 「Bundle 找不到 Models/openai_whisper-small」 | Whisper 模型沒拖進去 / 用成 group（黃色）而非 folder reference（藍色） |
-| 「離線翻譯尚未就緒」 | Qwen GGUF 還沒下載，進設定頁點下載 |
-| 「未設定 ModelDownloader.Config.downloadURL」 | 忘了填 `Config.downloadURL` |
-| SHA256 不一致 | CDN 上的檔案被換過；更新 `sha256Hex` 或重上傳 |
+| 「Qwen GGUF 未打包於 app bundle」 | Qwen .gguf 未加入 Runner target，或 Target Membership 未勾 |
+| IPA 體積過大 | 確認 Qwen 只存在一份（別同時放 bundle 與 Application Support），上架需符合平台大小限制 |
 | WhisperKit 編譯錯誤 | iOS deployment target 未升到 16.0 |
 | LLM.swift 連結錯誤 | 確認 `LLM` product 有加到 Runner 而不是被 unchecked |
 
@@ -101,7 +107,7 @@ cd .. && flutter run -d <iPhone id>
 ```
 ┌──────────────────────── Flutter / Dart ─────────────────────────┐
 │ lib/main.dart                                                   │
-│   _listenNow()      ─────(iOS + offline)──▶ _offlineAi.start… │
+│   _listenNow()      ─────(iOS)───────────▶ _offlineAi.start…  │
 │   _translateOffline()────(iOS)────────────▶ _offlineAi.trans… │
 │ lib/offline_ai_service.dart (MethodChannel/EventChannel)       │
 └───────────────────────────┬─────────────────────────────────────┘
@@ -110,6 +116,7 @@ cd .. && flutter run -d <iPhone id>
 │ ios/Runner/OfflineAI/OfflineAIPlugin.swift  (dispatcher)        │
 │ ├─ WhisperService.swift     →  WhisperKit (SPM) + AVAudioEngine │
 │ ├─ LlamaService.swift       →  LLM.swift (SPM, llama.cpp)       │
-│ └─ ModelDownloader.swift    →  URLSession + CryptoKit SHA256    │
+│ │      └─ 讀取 Runner bundle 內 Qwen GGUF（毋須下載）             │
+│ └─ ModelDownloader.swift    →  [已停用] 保留檔案以便 Xcode 參照    │
 └─────────────────────────────────────────────────────────────────┘
 ```

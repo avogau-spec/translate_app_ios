@@ -1,13 +1,13 @@
 import CryptoKit
 import Foundation
 
-/// 負責把 Qwen GGUF 從 CDN 下載到 Application Support/OfflineAI/。
+/// [已停用] Qwen GGUF 目前直接打包在 Runner app bundle，毋須再下載。
 ///
-/// - 支援 HTTP Range 續傳
-/// - 下載完成後以 SHA256 驗證
-/// - 進度以 `onProgress(downloaded, total)` 回呼（主執行緒）
+/// 此檔保留只為了：
+/// - 避免 Xcode 專案引用 (`project.pbxproj`) 需要手動移除
+/// - 若未來需切回 CDN 下載流程，可快速恢復
 ///
-/// 下載 URL / SHA256 在 `Config.swift` 調整；第一次設置請至少填 `downloadURL`。
+/// 本類別目前未被 `OfflineAIPlugin` 引用；編譯仍可通過但不會執行任何下載。
 final class ModelDownloader: NSObject {
 
     struct Config {

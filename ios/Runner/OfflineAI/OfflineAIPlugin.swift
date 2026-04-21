@@ -17,7 +17,6 @@ final class OfflineAIPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
     private let whisper: WhisperService
     private let llama: LlamaService
-    private let downloader: ModelDownloader
 
     static func register(with registrar: FlutterPluginRegistrar) {
         let method = FlutterMethodChannel(
@@ -36,7 +35,6 @@ final class OfflineAIPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     init(method: FlutterMethodChannel, events: FlutterEventChannel) {
         self.methodChannel = method
         self.eventChannel = events
-        self.downloader = ModelDownloader()
         self.whisper = WhisperService()
         self.llama = LlamaService()
         super.init()
@@ -146,6 +144,8 @@ final class OfflineAIPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         }
     }
 
+    /// 歷史上這個方法會觸發下載；目前 Qwen 直接打包在 app bundle 內，
+    /// 此方法改為「嘗試從 bundle 載入」並保留原介面給 Dart 端相容使用。
     private func handleEnsureLlmDownloaded(result: @escaping FlutterResult) async {
         if llama.isReady {
             emit(.llmReady)
@@ -153,16 +153,21 @@ final class OfflineAIPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             return
         }
         do {
-            let localURL = try await downloader.ensureQwenModel { [weak self] downloaded, total in
-                self?.emit(.llmProgress(downloaded: downloaded, total: total))
+            try await llama.prewarmIfReady()
+            if llama.isReady {
+                emit(.llmReady)
+                await MainActor.run { result(nil) }
+                return
             }
-            try await llama.load(modelURL: localURL)
-            emit(.llmReady)
-            await MainActor.run { result(nil) }
+            let msg = "Qwen GGUF 未打包於 app bundle。請將 Qwen2.5-1.5B-Instruct-Q4_K_M.gguf 加入 Runner target（詳見 ios/Runner/OfflineAI/README.md）。"
+            emit(.llmError(message: msg))
+            await MainActor.run {
+                result(FlutterError(code: "model_missing", message: msg, details: nil))
+            }
         } catch {
             emit(.llmError(message: "\(error)"))
             await MainActor.run {
-                result(FlutterError(code: "download_failed", message: "\(error)", details: nil))
+                result(FlutterError(code: "load_failed", message: "\(error)", details: nil))
             }
         }
     }
@@ -171,12 +176,18 @@ final class OfflineAIPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         var map: [String: Any] = [
             "whisperReady": whisper.isReady,
             "llmReady": llama.isReady,
-            "llmDownloading": downloader.isDownloading,
+            "llmDownloading": false,
+            "llmBundled": LlamaService.bundledModelURL() != nil,
         ]
         if let name = whisper.modelName { map["whisperModelName"] = name }
         if let name = llama.modelName { map["llmModelName"] = name }
-        if let bytes = downloader.lastBytes { map["llmBytes"] = bytes }
-        if let total = downloader.lastTotal { map["llmBytesTotal"] = total }
+        if let bundled = LlamaService.bundledModelURL() {
+            let attr = try? FileManager.default.attributesOfItem(atPath: bundled.path)
+            if let size = (attr?[.size] as? NSNumber)?.int64Value {
+                map["llmBytes"] = size
+                map["llmBytesTotal"] = size
+            }
+        }
         return map
     }
 

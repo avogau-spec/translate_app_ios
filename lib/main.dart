@@ -510,6 +510,7 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
 
   /// 由 Gemini `v1beta/models` 拉取；失敗時為 [kFallbackGeminiModelIds]。
   List<String> _availableModelIds = List<String>.from(kFallbackGeminiModelIds);
+  // ignore: unused_field
   bool _modelsLoading = false;
 
   @override
@@ -748,9 +749,6 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
       _dailyCount = _prefs!.getInt(kDailyCountPref) ?? 0;
       _isInitialized = true;
     });
-    if (_primaryKeyController.text.trim().isEmpty && mounted) {
-      _openSettings(forceRequired: true);
-    }
     if (!_offlinePromptShown && mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _promptOfflineModelDownload();
@@ -1229,7 +1227,7 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
     if (_offlineAi.isSupported) {
       if (!_offlineAiStatus.llmReady) {
         throw Exception(
-          '離線翻譯尚未就緒：請至「更多 → 離線 AI 模型」下載 Qwen-2.5-1.5B INT4（約 1GB）。',
+          '離線翻譯尚未就緒：Qwen 模型未內建於 app bundle，請聯絡開發者重新打包（ios/Runner/OfflineAI/README.md）。',
         );
       }
       try {
@@ -1279,26 +1277,17 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
       setState(() => _offlineAiStatus = s);
     } catch (_) {}
 
-    // Whisper 第一次載入（Core ML 編譯）需數秒；於啟動階段就預熱，避免首次收音延遲。
-    // 原生端 prewarm 對已載入狀態是 no-op，可安全重複呼叫。
+    // Whisper / Qwen 首次載入（Core ML 編譯、llama.cpp mmap）需數秒；於啟動階段就預熱,
+    // 避免首次收音或翻譯延遲。原生端 prewarm 對已載入狀態是 no-op，可安全重複呼叫。
     unawaited(() async {
       try {
         await _offlineAi.prewarm();
+        final OfflineAIStatus fresh = await _offlineAi.initialize();
         if (!mounted) return;
-        setState(() {
-          _offlineAiStatus = OfflineAIStatus(
-            whisperReady: true,
-            llmReady: _offlineAiStatus.llmReady,
-            llmDownloading: _offlineAiStatus.llmDownloading,
-            whisperModelName: _offlineAiStatus.whisperModelName,
-            llmModelName: _offlineAiStatus.llmModelName,
-            llmBytes: _offlineAiStatus.llmBytes,
-            llmBytesTotal: _offlineAiStatus.llmBytesTotal,
-          );
-        });
+        setState(() => _offlineAiStatus = fresh);
       } catch (_) {
-        // 模型未 bundle 或載入失敗：維持 whisperReady=false，進 offline 時會自動 fallback 到
-        // 原本的 speech_to_text onDevice 路徑，並出現提示。
+        // 模型未 bundle 或載入失敗：維持原狀態，UI 會顯示未就緒；
+        // 進 offline 時會自動 fallback 到 speech_to_text onDevice 路徑並出現提示。
       }
     }());
 
@@ -1533,6 +1522,10 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
   }
 
   bool _useOnDeviceForSpeech() {
+    // iOS 為全離線作業，固定走 Whisper on-device 辨識。
+    if (_offlineAi.isSupported) {
+      return true;
+    }
     switch (_speechMode) {
       case SpeechMode.online:
         return false;
@@ -2011,9 +2004,6 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
 
   Future<void> _openSettings({bool forceRequired = false}) async {
     if (_isSettingsOpen) return;
-    if (_primaryKeyController.text.trim().isNotEmpty) {
-      await _refreshModelList();
-    }
     if (!mounted) {
       return;
     }
@@ -2022,7 +2012,6 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
       context: context,
       barrierDismissible: !forceRequired,
       builder: (BuildContext context) {
-        SpeechMode speechDraft = _speechMode;
         bool locationDraft = _locationOptimize;
         AppTranslationFontSize translationFontDraft = _translationFontSize;
         MainDisplayMode displayModeDraft = _displayMode;
@@ -2091,27 +2080,6 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
                       },
                     ),
                     const SizedBox(height: 16),
-                    const Text('線上/離線 辨識', style: TextStyle(fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 6),
-                    const Text(
-                      '開＝連網辨識；關＝強制離線；自動＝有網連網、無網離線',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                    const SizedBox(height: 8),
-                    SegmentedButton<SpeechMode>(
-                      segments: const <ButtonSegment<SpeechMode>>[
-                        ButtonSegment<SpeechMode>(value: SpeechMode.online, label: Text('開')),
-                        ButtonSegment<SpeechMode>(value: SpeechMode.offline, label: Text('關')),
-                        ButtonSegment<SpeechMode>(value: SpeechMode.auto, label: Text('自動')),
-                      ],
-                      selected: <SpeechMode>{speechDraft},
-                      onSelectionChanged: (Set<SpeechMode> values) {
-                        setDialogState(() {
-                          speechDraft = values.first;
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 8),
                     FilledButton.tonalIcon(
                       onPressed: () {
                         unawaited(_preloadTranslationModelsForCurrentPair());
@@ -2134,95 +2102,12 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
                         });
                       },
                     ),
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        _modelsLoading ? '模型清單：向 API 更新中…' : '模型清單：已連線 API 拉取（失敗時用內建備援）',
-                        style: const TextStyle(fontSize: 12, color: Colors.grey),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    DropdownButtonFormField<String>(
-                      key: ValueKey<String>(
-                        '${_availableModelIds.join('|')}__${_selectedModel}__${_effectiveSelectedModel ?? 'nil'}__$_modelsLoading',
-                      ),
-                      initialValue:
-                          _isKnownModelSlot(_selectedModel) ? _selectedModel : kDefaultModelSlot,
-                      items: kModelMenuSlots.map((ModelMenuSlot s) {
-                        final bool hasMatch =
-                            _candidatesForModelSlot(s.key, _availableModelIds).isNotEmpty;
-                        return DropdownMenuItem<String>(
-                          value: s.key,
-                          enabled: hasMatch,
-                          child: Text(
-                            s.label,
-                            style: TextStyle(
-                              color: hasMatch ? null : Colors.grey,
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                      onChanged: _modelsLoading
-                          ? null
-                          : (String? value) {
-                              if (value == null) return;
-                              setState(() {
-                                _selectedModel = value;
-                              });
-                            },
-                      decoration: const InputDecoration(
-                        labelText: 'Primary 模型',
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('自動切回 Primary'),
-                      subtitle: const Text('預設開啟，偵測可用後自動回切'),
-                      value: _autoReturnPrimary,
-                      onChanged: (bool value) {
-                        setState(() {
-                          _autoReturnPrimary = value;
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 4),
-                    const Text(
-                      '備援只切換 API Key，模型維持與 Primary 相同。',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
                     const SizedBox(height: 20),
                     const Divider(),
                     const SizedBox(height: 8),
                     Text(
-                      '今日用量：$_dailyCount / $kDailyQuotaLimit',
-                      style: const TextStyle(fontSize: 13, color: Colors.grey),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
                       '歷史筆數：${_history.length}',
                       style: const TextStyle(fontSize: 13, color: Colors.grey),
-                    ),
-                    const SizedBox(height: 16),
-                    const Text('API Key', style: TextStyle(fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: _primaryKeyController,
-                      obscureText: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Primary Key (Gemini)',
-                        hintText: '輸入主要 API Key',
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _secondaryKeyController,
-                      obscureText: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Secondary Key (備援)',
-                        hintText: '可選，429 時切換',
-                      ),
                     ),
                   ],
                 ),
@@ -2238,7 +2123,6 @@ class _LiveTranslatePageState extends State<LiveTranslatePage> {
                 FilledButton(
                   onPressed: () {
                     setState(() {
-                      _speechMode = speechDraft;
                       _locationOptimize = locationDraft;
                       _translationFontSize = translationFontDraft;
                       _displayMode = displayModeDraft;
@@ -2996,9 +2880,9 @@ class _TranslationHistoryPageState extends State<TranslationHistoryPage> {
   }
 }
 
-/// iOS 離線 AI 模型管理頁：
+/// iOS 離線 AI 模型資訊頁：
 /// - 顯示 Whisper-small（bundle）狀態
-/// - 顯示 / 觸發 Qwen-2.5-1.5B-Instruct INT4 下載與載入
+/// - 顯示 Qwen-2.5-1.5B-Instruct INT4 bundle 載入狀態（不再提供下載）
 class OfflineAiModelPage extends StatefulWidget {
   const OfflineAiModelPage({
     super.key,
@@ -3015,25 +2899,13 @@ class OfflineAiModelPage extends StatefulWidget {
 
 class _OfflineAiModelPageState extends State<OfflineAiModelPage> {
   late OfflineAIStatus _status;
-  OfflineLlmProgress? _progress;
-  StreamSubscription<OfflineLlmProgress>? _sub;
   bool _busy = false;
 
   @override
   void initState() {
     super.initState();
     _status = widget.initialStatus;
-    _sub = widget.service.llmProgress.listen((OfflineLlmProgress p) {
-      if (!mounted) return;
-      setState(() => _progress = p);
-    });
     _refresh();
-  }
-
-  @override
-  void dispose() {
-    _sub?.cancel();
-    super.dispose();
   }
 
   Future<void> _refresh() async {
@@ -3044,7 +2916,8 @@ class _OfflineAiModelPageState extends State<OfflineAiModelPage> {
     } catch (_) {}
   }
 
-  Future<void> _download() async {
+  /// 嘗試請原生端把 bundle 內 Qwen 載入記憶體（等同 prewarm，但附回錯誤訊息）。
+  Future<void> _loadBundled() async {
     if (_busy) return;
     setState(() => _busy = true);
     try {
@@ -3053,7 +2926,7 @@ class _OfflineAiModelPageState extends State<OfflineAiModelPage> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('下載失敗：$e')),
+        SnackBar(content: Text('載入失敗：$e')),
       );
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -3074,10 +2947,6 @@ class _OfflineAiModelPageState extends State<OfflineAiModelPage> {
 
   @override
   Widget build(BuildContext context) {
-    final OfflineLlmProgress? p = _progress;
-    final bool downloading = p?.state == OfflineLlmState.downloading || _status.llmDownloading;
-    final double? ratio = p?.ratio;
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('離線 AI 模型'),
@@ -3115,13 +2984,13 @@ class _OfflineAiModelPageState extends State<OfflineAiModelPage> {
                   Row(
                     children: <Widget>[
                       Icon(
-                        _status.llmReady ? Icons.check_circle : Icons.cloud_download,
-                        color: _status.llmReady ? Colors.greenAccent : Colors.lightBlueAccent,
+                        _status.llmReady ? Icons.check_circle : Icons.error_outline,
+                        color: _status.llmReady ? Colors.greenAccent : Colors.orangeAccent,
                       ),
                       const SizedBox(width: 10),
                       const Expanded(
                         child: Text(
-                          '翻譯：Qwen-2.5-1.5B-Instruct (Q4_K_M, ~1GB)',
+                          '翻譯：Qwen-2.5-1.5B-Instruct (Q4_K_M, 已內建)',
                           style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
                         ),
                       ),
@@ -3130,23 +2999,18 @@ class _OfflineAiModelPageState extends State<OfflineAiModelPage> {
                   const SizedBox(height: 8),
                   Text(
                     _status.llmReady
-                        ? '模型已載入，可離線翻譯。'
-                        : downloading
-                            ? '下載中… ${_fmtBytes(p?.downloaded ?? _status.llmBytes)} / ${_fmtBytes(p?.total ?? _status.llmBytesTotal)}'
-                            : '尚未下載。首次使用約需 1GB 傳輸量，建議 Wi-Fi。',
+                        ? '模型已載入，可離線翻譯。檔案大小 ${_fmtBytes(_status.llmBytes)}。'
+                        : '尚未載入，點「載入模型」手動載入；或重新啟動 app 會自動從 bundle 讀取。\n'
+                            '若顯示未內建，請依 ios/Runner/OfflineAI/README.md 把 Qwen GGUF 加入 Runner target。',
                     style: const TextStyle(color: Colors.white70),
                   ),
-                  if (downloading) ...<Widget>[
-                    const SizedBox(height: 10),
-                    LinearProgressIndicator(value: ratio),
-                  ],
                   const SizedBox(height: 14),
                   Row(
                     children: <Widget>[
                       ElevatedButton.icon(
-                        onPressed: _busy || downloading || _status.llmReady ? null : _download,
-                        icon: const Icon(Icons.download),
-                        label: Text(_status.llmReady ? '已就緒' : (downloading ? '下載中' : '下載 Qwen')),
+                        onPressed: _busy || _status.llmReady ? null : _loadBundled,
+                        icon: const Icon(Icons.memory),
+                        label: Text(_status.llmReady ? '已就緒' : '載入模型'),
                       ),
                       const SizedBox(width: 12),
                       OutlinedButton.icon(
@@ -3164,7 +3028,7 @@ class _OfflineAiModelPageState extends State<OfflineAiModelPage> {
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 4),
             child: Text(
-              '說明：離線模式下，裝置上的 Whisper 負責語音轉文字，Qwen 負責翻譯；兩者皆不需要網路。若只有 Whisper 就緒，翻譯仍需連網或下載 Qwen。',
+              '說明：Whisper 與 Qwen 模型均打包於 app bundle，毋須下載即可離線執行。Whisper 負責語音轉文字，Qwen 負責翻譯。',
               style: TextStyle(color: Colors.white54, fontSize: 12, height: 1.4),
             ),
           ),

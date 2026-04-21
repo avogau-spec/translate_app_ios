@@ -5,12 +5,19 @@ import LLM
 ///
 /// 依賴 SPM：[`LLM.swift`](https://github.com/eastriverlee/LLM.swift)（內含 llama.cpp XCFramework）。
 ///
-/// 我們只做「翻譯」單輪任務，因此用 zero-temperature、short-output、stop-on-EOS 的設定，
+/// 我們只做「翻譯」單輪任務，因此用 zero-temperature、short-output、stop-on-EOS 的設定,
 /// 並固定 system prompt 讓模型只輸出譯文（避免解釋、避免加引號）。
+///
+/// 模型檔以 **直接打包進 Runner app bundle** 的方式提供（詳見 `OfflineAI/README.md`）。
+/// 若找不到 bundle 內模型,為相容舊版本,仍會嘗試讀取先前下載到 Application Support 的檔案。
 final class LlamaService {
 
-    /// Qwen GGUF 下載後存放位置（Documents/qwen2.5-1.5b-instruct-q4_k_m.gguf）。
+    /// Qwen GGUF 既定檔名（bundle 內 / 舊版 Application Support 皆以此名尋找）。
     static let expectedFilename = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+
+    /// Bundle 內慣用名稱（HuggingFace 原始檔名，大小寫保留）。
+    static let bundledResourceBaseName = "Qwen2.5-1.5B-Instruct-Q4_K_M"
+    static let bundledResourceExtension = "gguf"
 
     private(set) var isReady: Bool = false
     var modelName: String? { Self.expectedFilename }
@@ -19,12 +26,16 @@ final class LlamaService {
 
     // MARK: - Lifecycle
 
-    /// 若檔案已存在就自動載入。供 App 啟動時呼叫。
+    /// App 啟動或 ensureLlmDownloaded 時呼叫。優先讀 bundle 內模型；若無則降級到舊版下載路徑。
     func prewarmIfReady() async throws {
         if isReady { return }
-        let url = Self.defaultModelURL()
-        if FileManager.default.fileExists(atPath: url.path) {
-            try await load(modelURL: url)
+        if let bundled = Self.bundledModelURL() {
+            try await load(modelURL: bundled)
+            return
+        }
+        let legacy = Self.defaultModelURL()
+        if FileManager.default.fileExists(atPath: legacy.path) {
+            try await load(modelURL: legacy)
         }
     }
 
@@ -132,6 +143,32 @@ final class LlamaService {
 
     // MARK: - Paths
 
+    /// 取得 bundle 內的 Qwen GGUF（不存在則回 nil）。
+    ///
+    /// 支援兩種擺放方式：
+    /// - `Runner/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`（直接放在 target 根目錄）
+    /// - `Runner/Models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`（folder reference）
+    /// 同時相容舊版檔名 `qwen2.5-1.5b-instruct-q4_k_m.gguf`（lower-case）。
+    static func bundledModelURL() -> URL? {
+        let candidateNames: [(String, String?)] = [
+            (bundledResourceBaseName, nil),
+            (bundledResourceBaseName, "Models"),
+            ("qwen2.5-1.5b-instruct-q4_k_m", nil),
+            ("qwen2.5-1.5b-instruct-q4_k_m", "Models"),
+        ]
+        for (name, subdir) in candidateNames {
+            if let url = Bundle.main.url(
+                forResource: name,
+                withExtension: bundledResourceExtension,
+                subdirectory: subdir
+            ) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    /// 舊版本下載路徑；新版改為 bundle 內建，此路徑僅作為升級相容與 fallback。
     static func defaultModelURL() -> URL {
         let dir = try? FileManager.default.url(
             for: .applicationSupportDirectory,
